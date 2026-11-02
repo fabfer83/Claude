@@ -51,6 +51,15 @@ function normName(s) {
     .trim();
 }
 
+// Link che nel browser non partono: i "relinker" ufficiali RAI (mediapolis.rai.it) rifiutano
+// le richieste da altri siti, i link http:// sono bloccati su una pagina https.
+// Se per lo stesso canale c'è un link migliore, vince quello.
+function streamScore(url) {
+  if (/mediapolis(event)?\.rai\.it\/relinker/i.test(url || '')) return 0;
+  if (/^http:\/\//i.test(url || '')) return 0;
+  return 1;
+}
+
 // ID stabile del canale per ordinamento/hide/rename
 function channelId(c) { return normName(c.name); }
 
@@ -412,7 +421,7 @@ function startStallWatch(video) {
       // playhead fermo: se più di 10s, prova reload
       if (Date.now() - lastPlayheadAt > 10000) {
         console.warn('Stream stallato, ricarico…');
-        reloadStream();
+        if (!(t === 0 && tryNextStream())) reloadStream();
       }
     } else {
       lastPlayheadTime = t;
@@ -428,7 +437,7 @@ function play(ch) {
   if (hls) { hls.destroy(); hls = null; }
   clearTimeout(recoveryTimer);
 
-  const url = ch.stream;
+  const url = ch._alt ? ch.alts[ch._alt - 1] : ch.stream;
   const isHls = /\.m3u8(\?|$)/i.test(url);
   const safariCanPlayHLS = video.canPlayType('application/vnd.apple.mpegurl') !== '';
 
@@ -455,14 +464,15 @@ function play(ch) {
     hls.on(Hls.Events.ERROR, (_, data) => {
       console.warn('HLS event', data.type, data.details);
       if (!data.fatal) return;
+      if (/^manifest(Load|Parsing)/.test(data.details) && tryNextStream()) return;
       switch (data.type) {
         case Hls.ErrorTypes.NETWORK_ERROR:
           hls.startLoad(); break;
         case Hls.ErrorTypes.MEDIA_ERROR:
           hls.recoverMediaError(); break;
         default:
-          // fatal non recuperabile → full reload dopo 3s
-          recoveryTimer = setTimeout(() => reloadStream(), 3000);
+          // fatal non recuperabile → link di riserva, altrimenti full reload dopo 3s
+          if (!tryNextStream()) recoveryTimer = setTimeout(() => reloadStream(), 3000);
       }
     });
   } else {
@@ -471,7 +481,7 @@ function play(ch) {
   }
 
   // Recovery anche su <video> events nativi
-  video.onerror = () => { recoveryTimer = setTimeout(() => reloadStream(), 3000); };
+  video.onerror = () => { if (!tryNextStream()) recoveryTimer = setTimeout(() => reloadStream(), 3000); };
   video.onended = () => { if (currentItem) reloadStream(); };
   video.onstalled = () => { /* gestito da stall watchdog */ };
   startStallWatch(video);
@@ -482,6 +492,15 @@ function play(ch) {
   render();
 }
 function reloadStream() { if (currentItem) play(currentItem); }
+// Passa al link di riserva successivo del canale (alts). false se non ce ne sono altri.
+function tryNextStream() {
+  const ch = currentItem;
+  const next = (ch && ch._alt || 0) + 1;
+  if (!ch || !ch.alts || next > ch.alts.length) return false;
+  console.warn('Stream non disponibile, provo il link di riserva', next);
+  play({ ...ch, _alt: next });
+  return true;
+}
 
 // ---------- Sync via GitHub Gist ----------
 const SYNC_FILENAME = 'mytv-prefs.json';
@@ -667,8 +686,15 @@ async function loadMergedDefaults() {
     const k = normName(c.name);
     const existing = byKey.get(k);
     if (existing) {
-      // Stream Free-TV vince, logo del primo trovato (entrambi solitamente buoni)
-      byKey.set(k, { ...existing, stream: c.stream, name: existing.name, logo: existing.logo || c.logo });
+      // Stream Free-TV vince, logo del primo trovato (entrambi solitamente buoni),
+      // ma un relinker RAI non sostituisce mai un link che funziona nel browser
+      // Il link scartato resta come riserva in alts: se il primo non parte, play() prova il successivo
+      const pool = [existing.stream, ...(existing.alts || [])];
+      if (streamScore(c.stream) < streamScore(existing.stream)) {
+        if (!pool.includes(c.stream)) byKey.set(k, { ...existing, alts: [...(existing.alts || []), c.stream] });
+        continue;
+      }
+      byKey.set(k, { ...existing, stream: c.stream, alts: pool.filter(u => u && u !== c.stream), name: existing.name, logo: existing.logo || c.logo });
     } else {
       // Canale presente solo in Free-TV (es. Sky TG24)
       byKey.set(k, c);
@@ -687,8 +713,8 @@ async function loadDefaultListIfNeeded() {
   const stored = localStorage.getItem(STORAGE_KEY);
   // Se l'utente ha caricato un URL custom proprio, non sovrascrivere
   if (stored && !stored.startsWith('merged:') && stored !== DEFAULT_LIST_URL) return;
-  if (localStorage.getItem('mytv.defaultTried_v3')) return;
-  localStorage.setItem('mytv.defaultTried_v3', '1');
+  if (localStorage.getItem('mytv.defaultTried_v4')) return;
+  localStorage.setItem('mytv.defaultTried_v4', '1');
   try { await loadMergedDefaults(); }
   catch (e) { console.warn('Default merged fail:', e.message); try { await loadFromUrl(DEFAULT_LIST_URL); } catch {} }
 }
@@ -735,6 +761,7 @@ document.addEventListener('DOMContentLoaded', () => {
     localStorage.removeItem(CHANNELS_KEY);
     localStorage.removeItem('mytv.defaultTried');
     localStorage.removeItem('mytv.defaultTried_v3');
+    localStorage.removeItem('mytv.defaultTried_v4');
     loadedChannels = [];
     channels = mergeWithCatalog([]);
     render();
