@@ -435,9 +435,60 @@ function logoNode(ch, cls) {
     const img = document.createElement('img');
     img.src = ch.logo; img.alt = ''; img.loading = 'lazy'; img.decoding = 'async';
     img.onerror = () => { img.replaceWith(initialsNode(ch)); };
+    checkDarkLogo(img, ch.logo);
     return img;
   }
   return initialsNode(ch);
+}
+
+// Loghi neri o molto scuri (es. TV8) spariscono sul fondo scuro: li misuro una volta
+// su canvas e, se serve, gli do un fondino chiaro. Esito salvato in mytv.darkLogos.
+const DARK_KEY = 'mytv.darkLogos';
+let darkLogos = {};
+try { darkLogos = JSON.parse(localStorage.getItem(DARK_KEY) || '{}') || {}; } catch (e) {}
+const darkPending = {};
+function markDark(img) {
+  img.classList.add('dark-logo');
+  if (img.parentElement) img.parentElement.classList.add('dark-logo');
+}
+function checkDarkLogo(img, url) {
+  if (darkLogos[url] === 1) { img.addEventListener('load', () => markDark(img)); return; }
+  if (darkLogos[url] === 0) return;
+  img.addEventListener('load', () => {
+    measureLogo(url).then(dark => { if (dark) markDark(img); }, () => {});
+  }, { once: true });
+}
+function measureLogo(url) {
+  if (darkPending[url]) return darkPending[url];
+  darkPending[url] = new Promise((resolve, reject) => {
+    const probe = new Image();
+    probe.crossOrigin = 'anonymous';
+    probe.onload = () => {
+      try {
+        const w = 48, h = Math.max(1, Math.round(48 * probe.naturalHeight / (probe.naturalWidth || 1)));
+        const c = document.createElement('canvas');
+        c.width = w; c.height = Math.min(h, 96);
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(probe, 0, 0, c.width, c.height);
+        const px = ctx.getImageData(0, 0, c.width, c.height).data;
+        let sum = 0, n = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          if (px[i + 3] < 128) continue;
+          sum += (0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]) / 255;
+          n++;
+        }
+        // solo loghi con buona parte trasparente: un logo opaco ha già il suo fondo
+        const opaque = n / (px.length / 4);
+        const dark = n > 0 && opaque < 0.9 && sum / n < 0.18;
+        darkLogos[url] = dark ? 1 : 0;
+        try { localStorage.setItem(DARK_KEY, JSON.stringify(darkLogos)); } catch (e) {}
+        resolve(dark);
+      } catch (e) { reject(e); } // canvas "sporcato" (niente CORS): lascio com'è
+    };
+    probe.onerror = reject;
+    probe.src = url;
+  });
+  return darkPending[url];
 }
 function initialsNode(ch) {
   const d = document.createElement('span');
