@@ -434,6 +434,8 @@ body.edit-mode .row { cursor: default; }
     grid-template-columns: 88px minmax(0, 1fr) minmax(380px, 30vw);
     grid-template-rows: 100%;
   }
+  /* l'order del telefono (barra in fondo) non deve spingere la barra in una seconda riga */
+  .rail, .stage, .browser { grid-row: 1; }
   .rail {
     grid-column: 1; flex-direction: column; justify-content: flex-start; gap: 6px;
     padding: calc(16px + var(--safe-top)) 8px calc(16px + var(--safe-bottom));

@@ -606,9 +606,12 @@ function startDrag(e, li) {
   const container = li.parentNode;
   const scroller = $('#scroller');
   li.classList.add('dragging');
-  const handle = e.currentTarget;
-  try { handle.setPointerCapture(e.pointerId); } catch {}
+  // Ascolto sul documento: spostare la riga nel DOM fa perdere la cattura del puntatore,
+  // e con gli ascoltatori sulla maniglia il resto del trascinamento (e il salvataggio) andava perso.
+  const pid = e.pointerId;
   const move = (ev) => {
+    if (ev.pointerId !== pid) return;
+    ev.preventDefault();
     const y = ev.clientY;
     let prev = li.previousElementSibling, next = li.nextElementSibling;
     while (prev && y < prev.getBoundingClientRect().top + prev.offsetHeight / 2) { container.insertBefore(li, prev); prev = li.previousElementSibling; }
@@ -617,17 +620,18 @@ function startDrag(e, li) {
     if (y < r.top + 60) scroller.scrollTop -= 14;
     else if (y > r.bottom - 60) scroller.scrollTop += 14;
   };
-  const up = () => {
-    handle.removeEventListener('pointermove', move);
-    handle.removeEventListener('pointerup', up);
-    handle.removeEventListener('pointercancel', up);
+  const up = (ev) => {
+    if (ev.pointerId !== pid) return;
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', up);
+    document.removeEventListener('pointercancel', up);
     li.classList.remove('dragging');
     const ids = $$('.row', container).map(r => r.dataset.id);
     persistSubsetOrder(currentTab, ids);
   };
-  handle.addEventListener('pointermove', move);
-  handle.addEventListener('pointerup', up);
-  handle.addEventListener('pointercancel', up);
+  document.addEventListener('pointermove', move, { passive: false });
+  document.addEventListener('pointerup', up);
+  document.addEventListener('pointercancel', up);
 }
 
 function initials(name) {
