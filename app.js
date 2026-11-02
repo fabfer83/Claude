@@ -94,6 +94,7 @@ function streamScore(url) {
 const NATIVE_FIRST = {
   'rai 2': 'https://mediapolis.rai.it/relinker/relinkerServlet.htm?cont=308718&output=7&forceUserAgent=rainet/4.0.5',
 };
+const isSafari = /Safari\//.test(navigator.userAgent) && !/Chrome|Chromium|CriOS|Edg|OPR|Brave/.test(navigator.userAgent);
 const nativeHls = () => isIOS || $('#video').canPlayType('application/vnd.apple.mpegurl') !== '';
 // Nome breve della sorgente, mostrato sotto il canale e nel menu (per capire quale link è in uso)
 function sourceLabel(url) {
@@ -792,8 +793,10 @@ function startStallWatch(video) {
     if (video.paused) { lastPlayheadAt = Date.now(); return; }
     const t = video.currentTime || 0;
     if (Math.abs(t - lastPlayheadTime) < 0.05) {
-      // playhead fermo: se più di 10s, prova reload
-      if (Date.now() - lastPlayheadAt > 10000) {
+      // playhead fermo: se più di 10s, prova reload. Il link ufficiale RAI all'avvio può metterci
+      // più di 10 s (redirect, chiave, segmenti da 10 s): gli do 25 s prima di passare alla riserva
+      const slowStart = t === 0 && sourceLabel(streamList(currentItem)[currentItem._alt || 0]) === 'RAI ufficiale';
+      if (Date.now() - lastPlayheadAt > (slowStart ? 25000 : 10000)) {
         console.warn('Stream stallato, ricarico…');
         if (!(t === 0 && tryNextStream())) reloadStream();
       }
@@ -816,7 +819,11 @@ function play(ch) {
   const url = streamList(ch)[ch._alt || 0];
   const isHls = /\.m3u8(\?|$)/i.test(url);
   const safariCanPlayHLS = video.canPlayType('application/vnd.apple.mpegurl') !== '';
-  if (currentKind !== 'radio') $('#nowSub').textContent = 'In diretta · ' + sourceLabel(url) + (ch._alt ? ' (riserva)' : '');
+  if (currentKind !== 'radio') {
+    const src = sourceLabel(url) + (ch._alt ? ' (riserva)' : '');
+    $('#nowSub').textContent = 'Avvio in corso… · ' + src;
+    video.addEventListener('playing', () => { if (currentItem === ch) $('#nowSub').textContent = 'In diretta · ' + src; }, { once: true });
+  }
 
   // Su iOS Safari il player nativo è MOLTO più stabile di HLS.js per HLS live.
   if (isHls && (isIOS || safariCanPlayHLS)) {
@@ -1131,7 +1138,7 @@ async function updateAbout() {
   let cache = '';
   try { cache = (await caches.keys()).filter(k => k.startsWith('mytv-')).join(', '); } catch {}
   const lines = ['Versione ' + APP_VERSION + (cache ? ' · cache ' + cache : ''),
-    'Player: ' + (nativeHls() ? 'nativo di Apple' : 'hls.js')];
+    'Player: ' + (!nativeHls() ? 'hls.js' : (isIOS || isSafari) ? 'nativo di Apple' : 'nativo del browser')];
   if (currentItem && currentKind !== 'radio') {
     lines.push('In onda: ' + displayName(currentItem) + ' da ' + sourceLabel(streamList(currentItem)[currentItem._alt || 0]) + (currentItem._alt ? ' (riserva)' : ''));
   }
