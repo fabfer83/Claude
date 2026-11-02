@@ -86,6 +86,22 @@ function streamScore(url) {
   return 1;
 }
 
+// Con il player nativo (iPhone, iPad, Safari) il relinker RAI parte: il blocco riguarda solo
+// hls.js. Per questi canali il link ufficiale va per primo e gli altri restano di riserva.
+// Rai 2: il link CloudFront delle liste pubbliche ha l'80% dei quadri fermi (scatti), misurato
+// il 02/11/2026; quello ufficiale RAI lo 0%.
+const NATIVE_FIRST = {
+  'rai 2': 'https://mediapolis.rai.it/relinker/relinkerServlet.htm?cont=308718&output=7&forceUserAgent=rainet/4.0.5',
+};
+const nativeHls = () => isIOS || $('#video').canPlayType('application/vnd.apple.mpegurl') !== '';
+// Tutti i link del canale nell'ordine in cui provarli (_alt è l'indice qui dentro)
+function streamList(ch) {
+  const list = [ch.stream, ...(ch.alts || [])].filter(Boolean);
+  const first = NATIVE_FIRST[channelId(ch)];
+  if (!first || !nativeHls()) return list;
+  return [first, ...list.filter(u => u !== first)];
+}
+
 // ID stabile del canale per ordinamento/hide/rename
 function channelId(c) { return normName(c.name); }
 
@@ -787,7 +803,7 @@ function play(ch) {
   if (hls) { hls.destroy(); hls = null; }
   clearTimeout(recoveryTimer);
 
-  const url = ch._alt ? ch.alts[ch._alt - 1] : ch.stream;
+  const url = streamList(ch)[ch._alt || 0];
   const isHls = /\.m3u8(\?|$)/i.test(url);
   const safariCanPlayHLS = video.canPlayType('application/vnd.apple.mpegurl') !== '';
 
@@ -847,11 +863,11 @@ function play(ch) {
 // Ricarica ripartendo dal link principale: se anche le riserve non sono andate,
 // non si resta bloccati sull'ultima (es. relinker RAI, che nel browser non parte mai)
 function reloadStream() { if (currentItem) play(currentItem._alt ? { ...currentItem, _alt: 0 } : currentItem); }
-// Passa al link di riserva successivo del canale (alts). false se non ce ne sono altri.
+// Passa al link di riserva successivo del canale. false se non ce ne sono altri.
 function tryNextStream() {
   const ch = currentItem;
   const next = (ch && ch._alt || 0) + 1;
-  if (!ch || !ch.alts || next > ch.alts.length) return false;
+  if (!ch || next >= streamList(ch).length) return false;
   console.warn('Stream non disponibile, provo il link di riserva', next);
   play({ ...ch, _alt: next });
   return true;
