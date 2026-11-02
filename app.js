@@ -1,4 +1,5 @@
 // myTV — cross-platform TV/Radio streaming PWA
+const APP_VERSION = '14 (02/11/2026)';   // da alzare con app.js?v= in index.html e la cache in sw.js
 const $ = (s, r=document) => r.querySelector(s);
 const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
 
@@ -94,6 +95,15 @@ const NATIVE_FIRST = {
   'rai 2': 'https://mediapolis.rai.it/relinker/relinkerServlet.htm?cont=308718&output=7&forceUserAgent=rainet/4.0.5',
 };
 const nativeHls = () => isIOS || $('#video').canPlayType('application/vnd.apple.mpegurl') !== '';
+// Nome breve della sorgente, mostrato sotto il canale e nel menu (per capire quale link è in uso)
+function sourceLabel(url) {
+  const u = url || '';
+  if (/mediapolis(event)?\.rai\.it|akamaized\.net\/hls\/live\/\d+\/rai/i.test(u)) return 'RAI ufficiale';
+  if (/mediaset\.net/i.test(u)) return 'Mediaset ufficiale';
+  if (/cloudfront\.net/i.test(u)) return 'CloudFront';
+  try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return 'link'; }
+}
+
 // Tutti i link del canale nell'ordine in cui provarli (_alt è l'indice qui dentro)
 function streamList(ch) {
   const list = [ch.stream, ...(ch.alts || [])].filter(Boolean);
@@ -806,6 +816,7 @@ function play(ch) {
   const url = streamList(ch)[ch._alt || 0];
   const isHls = /\.m3u8(\?|$)/i.test(url);
   const safariCanPlayHLS = video.canPlayType('application/vnd.apple.mpegurl') !== '';
+  if (currentKind !== 'radio') $('#nowSub').textContent = 'In diretta · ' + sourceLabel(url) + (ch._alt ? ' (riserva)' : '');
 
   // Su iOS Safari il player nativo è MOLTO più stabile di HLS.js per HLS live.
   if (isHls && (isIOS || safariCanPlayHLS)) {
@@ -1114,7 +1125,18 @@ function toast(msg) {
 
 function openModal() { $('#modal').classList.remove('hidden'); const u = localStorage.getItem(STORAGE_KEY) || ''; $('#listUrl').value = u.startsWith('merged:') ? '' : u; setTimeout(()=>$('#listUrl').focus(), 100); }
 function closeModal() { $('#modal').classList.add('hidden'); }
-function openMenu() { $('#sideMenu').classList.remove('hidden'); $('#gistTokenInput').value = localStorage.getItem(GIST_TOKEN_KEY) || ''; updateSyncStatusUI(); }
+function openMenu() { $('#sideMenu').classList.remove('hidden'); $('#gistTokenInput').value = localStorage.getItem(GIST_TOKEN_KEY) || ''; updateSyncStatusUI(); updateAbout(); }
+// Impostazioni → Informazioni: versione, player e sorgente del canale in onda
+async function updateAbout() {
+  let cache = '';
+  try { cache = (await caches.keys()).filter(k => k.startsWith('mytv-')).join(', '); } catch {}
+  const lines = ['Versione ' + APP_VERSION + (cache ? ' · cache ' + cache : ''),
+    'Player: ' + (nativeHls() ? 'nativo di Apple' : 'hls.js')];
+  if (currentItem && currentKind !== 'radio') {
+    lines.push('In onda: ' + displayName(currentItem) + ' da ' + sourceLabel(streamList(currentItem)[currentItem._alt || 0]) + (currentItem._alt ? ' (riserva)' : ''));
+  }
+  $('#aboutInfo').textContent = lines.join('\n');
+}
 function closeMenu() { $('#sideMenu').classList.add('hidden'); }
 function clearSearch() {
   searchQuery = ''; $('#searchInput').value = ''; $('#closeSearch').hidden = true; render();
@@ -1402,7 +1424,19 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(()=>{});
+    // Al ritorno in primo piano (app sulla Home che resta in memoria) controllo se c'è una versione nuova
+    navigator.serviceWorker.register('sw.js').then(reg => {
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(()=>{}); });
+    }).catch(()=>{});
+    // Versione nuova attiva: ricarico subito se non si sta guardando niente, altrimenti avviso
+    const hadController = !!navigator.serviceWorker.controller;
+    let swReloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || swReloaded) return;
+      swReloaded = true;
+      if (!currentItem || $('#video').paused) location.reload();
+      else toast('myTV aggiornata: la nuova versione parte alla prossima apertura');
+    });
   }
 
   // Bridge wrapper Electron

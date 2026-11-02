@@ -1,5 +1,5 @@
 // Minimal app-shell cache. Streams are NEVER cached.
-const CACHE = 'mytv-v9';
+const CACHE = 'mytv-v10';
 const ASSETS = ['./', './index.html', './styles.css', './app.js', './catalog.js', './manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
@@ -20,9 +20,10 @@ self.addEventListener('fetch', (e) => {
   if (/\.(m3u8|ts|mp3|aac|mp4)(\?|$)/i.test(url.pathname)) return;
 
   // Network-first per file dell'app (index, css, js): aggiornamenti veloci.
+  // cache 'no-cache': GitHub Pages manda max-age=600, senza questo per 10 minuti tornava la versione vecchia.
   if (/\/(index\.html|styles\.css|app\.js|catalog\.js)$/.test(url.pathname) || url.pathname.endsWith('/')) {
     e.respondWith(
-      fetch(e.request).then(resp => {
+      fetch(e.request, { cache: 'no-cache' }).then(resp => {
         const copy = resp.clone();
         caches.open(CACHE).then(c => c.put(e.request, copy)).catch(()=>{});
         return resp;
