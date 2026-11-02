@@ -5,13 +5,17 @@ const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
 const STORAGE_KEY = 'mytv.listUrl';
 const CHANNELS_KEY = 'mytv.channels';
 const FAV_KEY = 'mytv.favs';
-const TAB_KEY = 'mytv.tab';
+const TAB_KEY = 'mytv.tab';            // 'tv' | 'radio' | 'apps'
 const ORDER_KEY = 'mytv.order';        // { tv: [id,...], radio: [id,...] }
 const HIDDEN_KEY = 'mytv.hidden';      // [id,...]
 const RENAME_KEY = 'mytv.renames';     // { id: "Nuovo nome" }
 const GIST_TOKEN_KEY = 'mytv.gistToken';
 const GIST_ID_KEY = 'mytv.gistId';
 const SYNC_TS_KEY = 'mytv.syncTs';
+// Chiavi nuove del restyling (solo aggiunte, le vecchie restano valide)
+const VIEW_KEY = 'mytv.view';          // 'grid' | 'list'
+const CHIP_KEY = 'mytv.chip';          // categoria TV scelta
+const LAST_KEY = 'mytv.lastPlayed';    // { name, kind }
 
 // Liste predefinite (in ordine di priorità per gli stream):
 //   1) Free-TV/IPTV — URL Mediaset/La7/Sky TG24/RaiNews24/TGCom24 in chiaro, niente DRM/geo-block
@@ -26,6 +30,8 @@ const DEFAULT_LIST_URL = DEFAULT_LIST_URLS[1];
 
 const RADIO_STATIONS = window.RADIO_CATALOG || [];
 const TV_CATALOG = window.TV_CATALOG || [];
+const TV_LCN = window.TV_LCN || {};
+const APPS = window.APPS_CATALOG || [];
 
 // Init preferiti di default al primo avvio
 if (!localStorage.getItem('mytv.favsInit') && Array.isArray(window.DEFAULT_FAVS)) {
@@ -49,6 +55,26 @@ function normName(s) {
     .replace(/\s+/g, ' ')
     .replace(/[^\w\s]/g, '')
     .trim();
+}
+
+// Nome da mostrare: toglie risoluzione, [Geo-blocked], "(Italy)" e i residui di attributi M3U
+// finiti nel nome con le vecchie liste. Non cambia l'ID del canale (ordine, nascosti, nomi restano validi).
+function cleanName(raw) {
+  let s = raw || '';
+  const q = s.lastIndexOf('",');
+  if (q !== -1) s = s.slice(q + 2);
+  s = s.replace(/\s*\[[^\]]*\]/g, '')
+    .replace(/\s*\(\s*\d{3,4}p\s*\)/gi, '')
+    .replace(/\s*\((Italy|Italia|IT)\)/gi, '')
+    .replace(/\s+(HD|SD|FHD)\b/g, '')
+    .replace(/\s+/g, ' ').trim();
+  return s || raw;
+}
+const cleanKeyCache = new Map();
+function cleanKey(ch) {
+  let k = cleanKeyCache.get(ch.name);
+  if (k === undefined) { k = normName(cleanName(ch.name)); cleanKeyCache.set(ch.name, k); }
+  return k;
 }
 
 // Link che nel browser non partono: i "relinker" ufficiali RAI (mediapolis.rai.it) rifiutano
@@ -88,13 +114,16 @@ let loadedChannels = [];
 let channels = mergeWithCatalog([]);
 let currentTab = localStorage.getItem(TAB_KEY) || 'tv';
 let currentItem = null;
+let currentKind = 'tv';
 let favs = new Set(JSON.parse(localStorage.getItem(FAV_KEY) || '[]'));
 let order = JSON.parse(localStorage.getItem(ORDER_KEY) || '{}');
 let hidden = new Set(JSON.parse(localStorage.getItem(HIDDEN_KEY) || '[]'));
 let renames = JSON.parse(localStorage.getItem(RENAME_KEY) || '{}');
-let showOnlyFavs = false;
 let searchQuery = '';
 let editMode = false;
+let viewMode = localStorage.getItem(VIEW_KEY) || 'grid';
+let currentChip = localStorage.getItem(CHIP_KEY) || 'all';
+let zapList = [];          // canali nell'ordine mostrato, per ‹ ›
 
 // ---------- List loading ----------
 async function loadFromUrl(url) {
@@ -125,15 +154,18 @@ function parseList(text) {
     let pending = null;
     for (const line of lines) {
       if (line.startsWith('#EXTINF')) {
-        const nameMatch = line.match(/,(.+)$/);
+        // Il nome segue la prima virgola FUORI dalle virgolette (alcuni attributi,
+        // es. http-user-agent, contengono virgole)
+        const masked = line.replace(/"[^"]*"/g, m => '"' + '_'.repeat(m.length - 2) + '"');
+        const comma = masked.indexOf(',');
         const logoMatch = line.match(/tvg-logo="([^"]+)"/);
         const countryMatch = line.match(/tvg-country="([^"]+)"/);
         const groupMatch = line.match(/group-title="([^"]+)"/);
-        const rawName = nameMatch ? nameMatch[1].trim() : 'Canale';
+        const rawName = comma !== -1 ? line.slice(comma + 1).trim() : 'Canale';
         // Free-TV/IPTV usa suffissi tipo "Ⓖ" (geo-locked label). Li rimuovo dal display.
-        const cleanName = rawName.replace(/[①-⓿☀-➿⬀-⯿️★]/g, '').replace(/\s+/g, ' ').trim();
+        const cleanNm = rawName.replace(/[①-⓿☀-➿⬀-⯿️★]/g, '').replace(/\s+/g, ' ').trim();
         pending = {
-          name: cleanName || rawName,
+          name: cleanNm || rawName,
           logo: logoMatch ? logoMatch[1] : null,
           country: countryMatch ? countryMatch[1] : null,
           group: groupMatch ? groupMatch[1] : null,
@@ -168,10 +200,44 @@ function loadCached() {
   channels = mergeWithCatalog(loadedChannels);
 }
 
+// ---------- Categorie ----------
+const CATEGORIES = [
+  { id: 'all',    label: 'Tutti' },
+  { id: 'favs',   label: 'Preferiti' },
+  { id: 'gen',    label: 'Generalisti' },
+  { id: 'kids',   label: 'Bambini' },
+  { id: 'news',   label: 'News' },
+  { id: 'sport',  label: 'Sport' },
+  { id: 'cinema', label: 'Cinema e serie' },
+  { id: 'music',  label: 'Musica' },
+  { id: 'local',  label: 'Regionali e altri' },
+];
+const catCache = new Map();
+function categoryOf(ch) {
+  const key = ch.name + '|' + (ch.group || '');
+  if (catCache.has(key)) return catCache.get(key);
+  const n = cleanKey(ch);
+  const g = (ch.group || '').toLowerCase();
+  let c = 'local';
+  if (/kids|animation/.test(g) || /^(boing|cartoonito|rai gulp|rai yoyo|frisbee|k2|super|super .+|nick.*|nickelodeon.*|dea kids|man ?ga|mr bean.*|teenage mutant.*|bejoykids|iunior tv|pluto tv teen.*)$/.test(n)) c = 'kids';
+  else if (/news|business|legislative/.test(g) || /\b(news|tg|tg24|tgcom|tgcom24|tgs|telegiornale|euronews|cnbc|adnkronos|senato|camera dei deputati)\b/.test(n)) c = 'news';
+  else if (/sport/.test(g) || /(sport|calcio|tennis|milan tv|inter tv|lazio style|motori|aci |fifa|horse tv|caccia|pesca|nautical)/.test(n)) c = 'sport';
+  else if (/movies|series|classic/.test(g) || /(movie|cine|cinema|film|iris|rakuten|pluto tv|giallo|top crime|crime|serie)/.test(n)) c = 'cinema';
+  else if (/music/.test(g) || /(radio|rtl 1025|deejay|m2o|kiss kiss|virgin|r101|music|rds )/.test(n)) c = 'music';
+  else if (TV_LCN[n]) c = 'gen';
+  catCache.set(key, c);
+  return c;
+}
+
 // ---------- Ordering / hide / rename ----------
+function lcnOf(ch) { return TV_LCN[cleanKey(ch)] || 1000; }
 function applyOrder(items, tabKey) {
   const ord = order[tabKey];
-  if (!Array.isArray(ord) || !ord.length) return items;
+  if (!Array.isArray(ord) || !ord.length) {
+    // Nessun ordine scelto: prima i canali nazionali per numero del telecomando, poi gli altri
+    if (tabKey !== 'tv') return items;
+    return items.map((c, i) => [c, lcnOf(c), i]).sort((a, b) => a[1] - b[1] || a[2] - b[2]).map(x => x[0]);
+  }
   const indexOfId = new Map(ord.map((id, i) => [id, i]));
   return [...items].sort((a, b) => {
     const ia = indexOfId.has(channelId(a)) ? indexOfId.get(channelId(a)) : 9999 + items.indexOf(a);
@@ -183,13 +249,30 @@ function applyOrder(items, tabKey) {
 function displayName(ch) {
   const id = channelId(ch);
   if (renames[id]) return renames[id];
-  return ch.name;
+  return cleanName(ch.name);
+}
+
+// Preferiti: si salvano per nome (come prima). Un canale è preferito anche se il nome
+// salvato differisce solo per "(720p)", "HD" ecc. (es. "Rai 1" e "Rai 1 (720p)").
+function isFav(ch) {
+  if (favs.has(ch.name)) return true;
+  const id = channelId(ch);
+  for (const f of favs) if (normName(f) === id) return true;
+  return false;
 }
 
 function persistOrder(tabKey, newIdsOrder) {
   order[tabKey] = newIdsOrder;
   localStorage.setItem(ORDER_KEY, JSON.stringify(order));
   scheduleSync();
+}
+// Riordino di una parte della lista: gli altri canali restano dove sono
+function persistSubsetOrder(tabKey, subsetIds) {
+  const full = applyOrder(tabItems(tabKey), tabKey).map(channelId);
+  const inSubset = new Set(subsetIds);
+  let i = 0;
+  const merged = full.map(id => inSubset.has(id) ? subsetIds[i++] : id);
+  persistOrder(tabKey, merged);
 }
 function persistHidden() {
   localStorage.setItem(HIDDEN_KEY, JSON.stringify([...hidden]));
@@ -204,137 +287,297 @@ function persistFavs() {
   scheduleSync();
 }
 
+function tabItems(tab) { return tab === 'radio' ? RADIO_STATIONS : channels; }
+function kindOf(ch) { return RADIO_STATIONS.some(r => r.name === ch.name) ? 'radio' : 'tv'; }
+
+// Canali visibili della sezione, ordinati e senza doppioni (stesso nome pulito)
+function visibleItems(tab) {
+  const items = tabItems(tab).filter(c => editMode || !hidden.has(channelId(c)));
+  const ordered = applyOrder(items, tab);
+  const best = new Map();
+  const quality = c => (c.name.includes('",') ? 0 : 2) + (c.stream ? 1 : 0);
+  for (const c of ordered) {
+    const k = cleanKey(c);
+    const prev = best.get(k);
+    if (!prev || quality(c) > quality(prev)) best.set(k, c);
+  }
+  return ordered.filter(c => best.get(cleanKey(c)) === c);
+}
+
 // ---------- Rendering ----------
+const HEART = '<svg viewBox="0 0 24 24"><path d="M12 21s-7-4.5-9.5-9A5.5 5.5 0 0 1 12 6a5.5 5.5 0 0 1 9.5 6C19 16.5 12 21 12 21z" stroke="currentColor" stroke-width="2" fill="none" stroke-linejoin="round"/></svg>';
+const HEART_FULL = '<svg viewBox="0 0 24 24"><path d="M12 21s-7-4.5-9.5-9A5.5 5.5 0 0 1 12 6a5.5 5.5 0 0 1 9.5 6C19 16.5 12 21 12 21z" fill="currentColor"/></svg>';
+
 function render() {
+  const app = $('#app');
+  app.classList.toggle('view-list', viewMode === 'list' || editMode);
+  app.classList.toggle('section-apps', currentTab === 'apps');
+  $('#sectionTitle').textContent = currentTab === 'tv' ? 'TV' : currentTab === 'radio' ? 'Radio' : 'App';
+  $('#searchInput').placeholder = currentTab === 'tv' ? 'Cerca un canale' : currentTab === 'radio' ? 'Cerca una radio' : 'Cerca un\'app';
+  $('#editDoneBtn').hidden = !editMode;
+
   const list = $('#channelList');
+  const appsPanel = $('#appsPanel');
+  if (currentTab === 'apps') {
+    list.hidden = true; appsPanel.hidden = false;
+    renderApps();
+    updateSyncStatusUI();
+    return;
+  }
+  list.hidden = false; appsPanel.hidden = true;
   list.innerHTML = '';
-  const items = currentTab === 'tv' ? channels : RADIO_STATIONS;
-  let filtered = items.filter(c => {
-    const id = channelId(c);
-    if (!editMode && hidden.has(id)) return false;
-    if (showOnlyFavs && !favs.has(c.name)) return false;
-    if (searchQuery) {
-      const dn = displayName(c).toLowerCase();
-      if (!dn.includes(searchQuery) && !c.name.toLowerCase().includes(searchQuery)) return false;
-    }
-    return true;
-  });
-  filtered = applyOrder(filtered, currentTab);
+
+  const all = visibleItems(currentTab);
+  renderChips(all);
 
   if (currentTab === 'tv' && loadedChannels.length === 0) {
-    const banner = document.createElement('li');
-    banner.style.cssText = 'list-style:none;padding:12px 14px;margin:0 0 8px;background:#2a1a05;color:#ffb35a;border-radius:12px;font-size:14px';
-    banner.innerHTML = 'Nessuna lista canali caricata. I loghi sono visibili, ma per riprodurre i canali tocca <strong>+</strong> e inserisci l\'URL della tua lista (JSON o M3U).';
-    list.appendChild(banner);
+    const n = document.createElement('div');
+    n.className = 'notice';
+    n.innerHTML = 'Caricamento della lista canali… Se non parte, apri <strong>Impostazioni</strong> e tocca «Ripristina lista predefinita».';
+    list.appendChild(n);
   }
 
-  for (const ch of filtered) {
-    const li = document.createElement('li');
-    li.className = 'channel-item';
-    const id = channelId(ch);
-    li.dataset.id = id;
-    if (currentItem && currentItem.name === ch.name) li.classList.add('playing');
-    if (hidden.has(id)) li.classList.add('hidden-channel');
-
-    // drag handle (visibile solo in edit mode)
-    const handle = document.createElement('div');
-    handle.className = 'drag-handle';
-    handle.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 6h2v2H9zM13 6h2v2h-2zM9 11h2v2H9zM13 11h2v2h-2zM9 16h2v2H9zM13 16h2v2h-2z" fill="currentColor"/></svg>';
-    li.appendChild(handle);
-
-    const logo = document.createElement('div');
-    logo.className = 'logo';
-    if (ch.logo) {
-      const img = document.createElement('img');
-      img.src = ch.logo; img.alt = ch.name;
-      img.onerror = () => { logo.textContent = initials(displayName(ch)); };
-      logo.appendChild(img);
-    } else {
-      logo.style.background = ch.color || colorFor(ch.name);
-      logo.textContent = initials(displayName(ch));
+  let sections = [];
+  if (editMode) {
+    const b = document.createElement('div');
+    b.className = 'edit-banner';
+    b.textContent = 'Trascina ⠿ per cambiare l\'ordine, ✎ per rinominare, 👁 per nascondere. Tocca «Fine» quando hai finito.';
+    list.appendChild(b);
+    sections = [{ title: null, items: filterSearch(all) }];
+  } else if (searchQuery) {
+    const res = filterSearch(all);
+    sections = [{ title: res.length ? 'Risultati' : null, items: res }];
+    if (!res.length) list.insertAdjacentHTML('beforeend', '<div class="empty">Nessun risultato per «' + escapeHtml(searchQuery) + '».</div>');
+  } else if (currentTab === 'radio') {
+    const fav = all.filter(isFav);
+    if (fav.length) sections.push({ title: 'Preferiti', items: fav });
+    sections.push({ title: 'Tutte le radio', items: all });
+  } else if (currentChip === 'all') {
+    const fav = all.filter(isFav);
+    if (fav.length) sections.push({ title: 'Preferiti', items: fav, chip: 'favs' });
+    for (const cat of CATEGORIES.slice(2)) {
+      const items = all.filter(c => categoryOf(c) === cat.id);
+      if (items.length) sections.push({ title: cat.label, items, chip: cat.id });
     }
-    li.appendChild(logo);
-
-    const name = document.createElement('div');
-    name.className = 'channel-name';
-    name.textContent = displayName(ch);
-    li.appendChild(name);
-
-    // Azioni normali (fav)
-    const favBtn = document.createElement('button');
-    favBtn.className = 'icon-btn channel-actions';
-    favBtn.setAttribute('aria-label', 'Preferito');
-    favBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 21s-7-4.5-9.5-9A5.5 5.5 0 0 1 12 6a5.5 5.5 0 0 1 9.5 6C19 16.5 12 21 12 21z" stroke="currentColor" stroke-width="2" fill="none" stroke-linejoin="round"/></svg>';
-    if (favs.has(ch.name)) favBtn.style.color = 'var(--accent)';
-    favBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleFav(ch); });
-    li.appendChild(favBtn);
-
-    // Azioni edit (rinomina / nascondi)
-    const editActions = document.createElement('div');
-    editActions.className = 'channel-edit-actions';
-    const renameBtn = document.createElement('button');
-    renameBtn.className = 'icon-btn small';
-    renameBtn.setAttribute('aria-label', 'Rinomina');
-    renameBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z" stroke="currentColor" stroke-width="2" fill="none" stroke-linejoin="round"/></svg>';
-    renameBtn.addEventListener('click', (e) => { e.stopPropagation(); openRenameModal(ch); });
-    const hideBtn = document.createElement('button');
-    hideBtn.className = 'icon-btn small';
-    hideBtn.setAttribute('aria-label', hidden.has(id) ? 'Mostra' : 'Nascondi');
-    hideBtn.innerHTML = hidden.has(id)
-      ? '<svg viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2" fill="none"/></svg>'
-      : '<svg viewBox="0 0 24 24"><path d="M3 3l18 18M10.6 5.1A11 11 0 0 1 22 12s-1.7 3-5 5M6.7 6.7C3.6 8.6 2 12 2 12s4 7 10 7c1.6 0 3-.4 4.3-1" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>';
-    hideBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleHidden(ch); });
-    editActions.appendChild(renameBtn);
-    editActions.appendChild(hideBtn);
-    li.appendChild(editActions);
-
-    if (editMode) {
-      li.draggable = true;
-      li.addEventListener('dragstart', onDragStart);
-      li.addEventListener('dragover', onDragOver);
-      li.addEventListener('dragleave', onDragLeave);
-      li.addEventListener('drop', onDrop);
-      li.addEventListener('dragend', onDragEnd);
-    } else if (!ch.stream && currentTab === 'tv') {
-      li.style.opacity = '0.55';
-      li.addEventListener('click', () => alert('Nessuno stream disponibile per "' + displayName(ch) + '". Carica una lista canali con il tasto +.'));
-    } else {
-      li.addEventListener('click', () => play(ch));
-    }
-    list.appendChild(li);
+  } else if (currentChip === 'favs') {
+    const fav = all.filter(isFav);
+    sections = [{ title: null, items: fav }];
+    if (!fav.length) list.insertAdjacentHTML('beforeend', '<div class="empty">Ancora nessun preferito.<br>Tieni premuto un canale (o usa ♥ nel player) per aggiungerlo.</div>');
+  } else {
+    sections = [{ title: null, items: all.filter(c => categoryOf(c) === currentChip) }];
   }
+
+  // ‹ › seguono l'ordine completo in "Tutti", altrimenti quello mostrato (categoria o ricerca)
+  const zapFull = currentTab === 'tv' && currentChip === 'all' && !searchQuery && !editMode;
+  zapList = zapFull ? all.slice() : [];
+  const asList = viewMode === 'list' || editMode;
+  for (const sec of sections) {
+    if (sec.title) {
+      const h = document.createElement('div');
+      h.className = 'section-head';
+      h.innerHTML = '<span>' + escapeHtml(sec.title) + ' <span class="n">' + sec.items.length + '</span></span>';
+      if (sec.chip && sec.items.length > 12 && currentChip === 'all') {
+        const more = document.createElement('button');
+        more.textContent = 'Vedi tutti';
+        more.addEventListener('click', () => setChip(sec.chip));
+        h.appendChild(more);
+      }
+      list.appendChild(h);
+    }
+    const wrap = document.createElement('div');
+    wrap.className = asList ? 'list' : 'grid';
+    // In "Tutti" ogni categoria mostra le prime 12 tessere: il resto con "Vedi tutti"
+    const items = (!asList && currentChip === 'all' && !searchQuery && sec.chip && sec.chip !== 'favs' && currentTab === 'tv') ? sec.items.slice(0, 12) : sec.items;
+    for (const ch of items) {
+      wrap.appendChild(asList ? buildRow(ch) : buildTile(ch));
+      if (!zapFull && !zapList.includes(ch)) zapList.push(ch);
+    }
+    list.appendChild(wrap);
+  }
+  updateNowFav();
   // toast eventuale stato sync
   updateSyncStatusUI();
 }
 
-// ---------- Drag & drop ----------
-let dragSrcId = null;
-function onDragStart(e) {
-  dragSrcId = this.dataset.id;
-  this.classList.add('dragging');
-  e.dataTransfer.effectAllowed = 'move';
-  e.dataTransfer.setData('text/plain', dragSrcId);
+function filterSearch(items) {
+  if (!searchQuery) return items;
+  return items.filter(c => displayName(c).toLowerCase().includes(searchQuery) || c.name.toLowerCase().includes(searchQuery));
 }
-function onDragOver(e) {
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'move';
-  this.classList.add('drop-target');
+
+function renderChips(all) {
+  const chips = $('#chips');
+  chips.innerHTML = '';
+  if (currentTab !== 'tv' || editMode) { chips.hidden = true; return; }
+  chips.hidden = false;
+  for (const cat of CATEGORIES) {
+    const n = cat.id === 'all' ? all.length : cat.id === 'favs' ? all.filter(isFav).length : all.filter(c => categoryOf(c) === cat.id).length;
+    if (!n && cat.id !== 'favs') continue;
+    const b = document.createElement('button');
+    b.className = 'chip' + (currentChip === cat.id ? ' active' : '');
+    b.setAttribute('role', 'tab');
+    b.innerHTML = escapeHtml(cat.label) + ' <span class="n">' + n + '</span>';
+    b.addEventListener('click', () => setChip(cat.id));
+    chips.appendChild(b);
+  }
 }
-function onDragLeave() { this.classList.remove('drop-target'); }
-function onDrop(e) {
-  e.preventDefault();
-  this.classList.remove('drop-target');
-  const targetId = this.dataset.id;
-  if (!dragSrcId || dragSrcId === targetId) return;
-  // Calcola il nuovo ordine completo dal DOM
-  const all = $$('#channelList .channel-item').map(li => li.dataset.id);
-  const src = all.indexOf(dragSrcId);
-  const tgt = all.indexOf(targetId);
-  all.splice(tgt, 0, all.splice(src, 1)[0]);
-  persistOrder(currentTab, all);
+
+function setChip(id) {
+  currentChip = id;
+  localStorage.setItem(CHIP_KEY, id);
   render();
+  $('#scroller').scrollTop = 0;
+  const active = $('#chips .chip.active');
+  if (active) active.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
 }
-function onDragEnd() { $$('.channel-item').forEach(li => { li.classList.remove('dragging'); li.classList.remove('drop-target'); }); dragSrcId = null; }
+
+function logoNode(ch, cls) {
+  if (ch.logo) {
+    const img = document.createElement('img');
+    img.src = ch.logo; img.alt = ''; img.loading = 'lazy'; img.decoding = 'async';
+    img.onerror = () => { img.replaceWith(initialsNode(ch)); };
+    return img;
+  }
+  return initialsNode(ch);
+}
+function initialsNode(ch) {
+  const d = document.createElement('span');
+  d.className = 'initials';
+  d.style.background = ch.color || colorFor(ch.name);
+  d.textContent = initials(displayName(ch));
+  return d;
+}
+
+function isPlaying(ch) { return currentItem && currentItem.name === ch.name; }
+
+function buildTile(ch) {
+  const el = document.createElement('button');
+  el.className = 'tile';
+  el.dataset.id = channelId(ch);
+  if (isPlaying(ch)) el.classList.add('playing');
+  if (!ch.stream && currentTab === 'tv') el.classList.add('no-stream');
+  const logo = document.createElement('span');
+  logo.className = 'tile-logo';
+  logo.appendChild(logoNode(ch));
+  el.appendChild(logo);
+  const name = document.createElement('span');
+  name.className = 'tile-name';
+  name.textContent = displayName(ch);
+  el.appendChild(name);
+  if (isFav(ch)) el.insertAdjacentHTML('beforeend', '<span class="tile-fav">' + HEART_FULL + '</span>');
+  attachPress(el, ch);
+  return el;
+}
+
+function buildRow(ch) {
+  const li = document.createElement('div');
+  li.className = 'row channel-item';
+  const id = channelId(ch);
+  li.dataset.id = id;
+  if (isPlaying(ch)) li.classList.add('playing');
+  if (hidden.has(id)) li.classList.add('hidden-channel');
+
+  // drag handle (visibile solo in edit mode)
+  const handle = document.createElement('div');
+  handle.className = 'drag-handle';
+  handle.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 6h2v2H9zM13 6h2v2h-2zM9 11h2v2H9zM13 11h2v2h-2zM9 16h2v2H9zM13 16h2v2h-2z" fill="currentColor"/></svg>';
+  handle.addEventListener('pointerdown', (e) => startDrag(e, li));
+  li.appendChild(handle);
+
+  const logo = document.createElement('div');
+  logo.className = 'logo';
+  logo.appendChild(logoNode(ch));
+  li.appendChild(logo);
+
+  const name = document.createElement('div');
+  name.className = 'channel-name';
+  name.textContent = displayName(ch);
+  li.appendChild(name);
+
+  // Azioni normali (fav)
+  const favBtn = document.createElement('button');
+  favBtn.className = 'icon-btn fav-btn' + (isFav(ch) ? ' on' : '');
+  favBtn.setAttribute('aria-label', 'Preferito');
+  favBtn.innerHTML = HEART;
+  favBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleFav(ch); });
+  li.appendChild(favBtn);
+
+  // Azioni edit (rinomina / nascondi)
+  const editActions = document.createElement('div');
+  editActions.className = 'channel-edit-actions';
+  const renameBtn = document.createElement('button');
+  renameBtn.className = 'icon-btn small';
+  renameBtn.setAttribute('aria-label', 'Rinomina');
+  renameBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z" stroke="currentColor" stroke-width="2" fill="none" stroke-linejoin="round"/></svg>';
+  renameBtn.addEventListener('click', (e) => { e.stopPropagation(); openRenameModal(ch); });
+  const hideBtn = document.createElement('button');
+  hideBtn.className = 'icon-btn small';
+  hideBtn.setAttribute('aria-label', hidden.has(id) ? 'Mostra' : 'Nascondi');
+  hideBtn.innerHTML = hidden.has(id)
+    ? '<svg viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2" fill="none"/></svg>'
+    : '<svg viewBox="0 0 24 24"><path d="M3 3l18 18M10.6 5.1A11 11 0 0 1 22 12s-1.7 3-5 5M6.7 6.7C3.6 8.6 2 12 2 12s4 7 10 7c1.6 0 3-.4 4.3-1" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>';
+  hideBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleHidden(ch); });
+  editActions.appendChild(renameBtn);
+  editActions.appendChild(hideBtn);
+  li.appendChild(editActions);
+
+  if (!editMode) attachPress(li, ch);
+  return li;
+}
+
+// Tocco = guarda; tieni premuto (o tasto destro) = menu del canale
+function attachPress(el, ch) {
+  let timer = null, startX = 0, startY = 0, longFired = false;
+  el.addEventListener('pointerdown', (e) => {
+    if (e.button === 2) return;
+    longFired = false; startX = e.clientX; startY = e.clientY;
+    clearTimeout(timer);
+    timer = setTimeout(() => { longFired = true; if (navigator.vibrate) navigator.vibrate(10); openSheet(ch); }, 480);
+  });
+  el.addEventListener('pointermove', (e) => { if (Math.abs(e.clientX - startX) > 10 || Math.abs(e.clientY - startY) > 10) clearTimeout(timer); });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(t => el.addEventListener(t, () => clearTimeout(timer)));
+  el.addEventListener('contextmenu', (e) => { e.preventDefault(); clearTimeout(timer); longFired = true; openSheet(ch); });
+  el.addEventListener('click', (e) => {
+    if (longFired) { e.preventDefault(); longFired = false; return; }
+    choose(ch);
+  });
+}
+
+function choose(ch) {
+  if (!ch.stream) { toast('Nessuno stream disponibile per «' + displayName(ch) + '».'); return; }
+  play(ch);
+  if ($('#searchInput') === document.activeElement) $('#searchInput').blur();
+}
+
+// ---------- Drag & drop (dito e mouse, solo in modifica) ----------
+function startDrag(e, li) {
+  if (!editMode) return;
+  e.preventDefault();
+  const container = li.parentNode;
+  const scroller = $('#scroller');
+  li.classList.add('dragging');
+  const handle = e.currentTarget;
+  try { handle.setPointerCapture(e.pointerId); } catch {}
+  const move = (ev) => {
+    const y = ev.clientY;
+    let prev = li.previousElementSibling, next = li.nextElementSibling;
+    while (prev && y < prev.getBoundingClientRect().top + prev.offsetHeight / 2) { container.insertBefore(li, prev); prev = li.previousElementSibling; }
+    while (next && y > next.getBoundingClientRect().top + next.offsetHeight / 2) { container.insertBefore(next, li); next = li.nextElementSibling; }
+    const r = scroller.getBoundingClientRect();
+    if (y < r.top + 60) scroller.scrollTop -= 14;
+    else if (y > r.bottom - 60) scroller.scrollTop += 14;
+  };
+  const up = () => {
+    handle.removeEventListener('pointermove', move);
+    handle.removeEventListener('pointerup', up);
+    handle.removeEventListener('pointercancel', up);
+    li.classList.remove('dragging');
+    const ids = $$('.row', container).map(r => r.dataset.id);
+    persistSubsetOrder(currentTab, ids);
+  };
+  handle.addEventListener('pointermove', move);
+  handle.addEventListener('pointerup', up);
+  handle.addEventListener('pointercancel', up);
+}
 
 function initials(name) {
   return name.split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
@@ -344,9 +587,17 @@ function colorFor(name) {
   for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   return `hsl(${h % 360}, 55%, 35%)`;
 }
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
 function toggleFav(ch) {
-  if (favs.has(ch.name)) favs.delete(ch.name); else favs.add(ch.name);
+  if (isFav(ch)) {
+    const id = channelId(ch);
+    for (const f of [...favs]) if (f === ch.name || normName(f) === id) favs.delete(f);
+    toast('Tolto dai preferiti');
+  } else {
+    favs.add(ch.name);
+    toast('Aggiunto ai preferiti');
+  }
   persistFavs();
   render();
 }
@@ -356,6 +607,18 @@ function toggleHidden(ch) {
   persistHidden();
   render();
 }
+
+// ---------- Menu del canale ----------
+let sheetCh = null;
+function openSheet(ch) {
+  sheetCh = ch;
+  $('#sheetTitle').textContent = displayName(ch);
+  $('#sheetLogo').style.backgroundImage = ch.logo ? `url("${ch.logo}")` : '';
+  $('#sheetFav').textContent = isFav(ch) ? 'Togli dai preferiti' : 'Aggiungi ai preferiti';
+  $('#sheetHide').textContent = hidden.has(channelId(ch)) ? 'Mostra di nuovo' : 'Nascondi';
+  $('#sheet').classList.remove('hidden');
+}
+function closeSheet() { $('#sheet').classList.add('hidden'); sheetCh = null; }
 
 // ---------- Rename modal ----------
 let renameTargetId = null;
@@ -374,6 +637,32 @@ function saveRename() {
   persistRenames();
   closeRenameModal();
   render();
+  if (currentItem) updateNowPlaying(currentItem);
+}
+
+// ---------- Sezione App ----------
+const ARROW = '<svg class="arrow" viewBox="0 0 24 24"><path d="M7 17L17 7M9 7h8v8" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+function renderApps() {
+  const p = $('#appsPanel');
+  const q = searchQuery;
+  const apps = APPS.filter(a => !q || a.name.toLowerCase().includes(q));
+  p.innerHTML = '';
+  p.insertAdjacentHTML('beforeend', '<p class="apps-intro">Tocca un servizio: si apre la sua app ufficiale (se è installata) o il suo sito. Accedi lì una volta sola: il login resta salvato nell\'app o nel browser, myTV non chiede e non conserva password.</p>');
+  const grid = document.createElement('div');
+  grid.className = 'apps-grid';
+  for (const a of apps) {
+    const t = document.createElement('a');
+    t.className = 'app-tile' + (a.dark ? ' dark-text' : '');
+    t.href = a.url; t.target = '_blank'; t.rel = 'noopener noreferrer';
+    t.style.background = a.bg;
+    t.style.color = a.fg;
+    t.innerHTML = ARROW + '<span class="app-mark' + (a.font === 'heavy' ? ' heavy' : '') + '">' + escapeHtml(a.mark) + '</span><span class="app-sub">' + escapeHtml(a.name) + '</span>';
+    if (a.accent) t.querySelector('.app-mark').style.textShadow = `0 0 24px ${a.accent}55`;
+    grid.appendChild(t);
+  }
+  p.appendChild(grid);
+  if (!apps.length) p.insertAdjacentHTML('beforeend', '<div class="empty">Nessuna app trovata.</div>');
+  p.insertAdjacentHTML('beforeend', '<div class="apps-note"><strong>Perché non si guardano dentro myTV?</strong> Netflix, Prime Video, Disney+ e gli altri proteggono i video con il DRM e vietano di essere aperti dentro altri siti. Per questo myTV li apre nella loro app o nel loro sito, dove resti collegato.<ul><li><strong>iPhone e iPad:</strong> con l\'app del servizio installata si apre l\'app; altrimenti il sito.</li><li><strong>Mac:</strong> si apre il sito in una finestra del browser, già collegato dopo il primo accesso.</li></ul></div>');
 }
 
 // ---------- Player (stabile su iOS + recovery automatico) ----------
@@ -396,7 +685,7 @@ function releaseWakeLock() { try { wakeLock && wakeLock.release(); } catch {} wa
 
 function setupMediaSession(ch) {
   if (!('mediaSession' in navigator)) return;
-  const md = { title: displayName(ch), artist: 'myTV', album: currentTab === 'radio' ? 'Radio' : 'TV' };
+  const md = { title: displayName(ch), artist: 'myTV', album: currentKind === 'radio' ? 'Radio' : 'TV' };
   if (ch.logo) md.artwork = [
     { src: ch.logo, sizes: '96x96',  type: 'image/png' },
     { src: ch.logo, sizes: '192x192', type: 'image/png' },
@@ -406,7 +695,11 @@ function setupMediaSession(ch) {
   const v = $('#video');
   navigator.mediaSession.setActionHandler('play',  () => { v.play().catch(()=>{}); });
   navigator.mediaSession.setActionHandler('pause', () => v.pause());
-  navigator.mediaSession.setActionHandler('stop',  () => { v.pause(); v.removeAttribute('src'); v.load(); if (hls) { hls.destroy(); hls = null; } currentItem = null; releaseWakeLock(); render(); });
+  navigator.mediaSession.setActionHandler('stop',  () => stopPlayback());
+  try {
+    navigator.mediaSession.setActionHandler('previoustrack', () => zap(-1));
+    navigator.mediaSession.setActionHandler('nexttrack', () => zap(1));
+  } catch {}
 }
 
 function startStallWatch(video) {
@@ -431,8 +724,10 @@ function startStallWatch(video) {
 }
 
 function play(ch) {
+  const wasMini = $('#app').classList.contains('mini') && !autoMini;
   currentItem = ch;
-  $('#nowPlaying').textContent = displayName(ch);
+  currentKind = kindOf(ch);
+  updateNowPlaying(ch);
   const video = $('#video');
   if (hls) { hls.destroy(); hls = null; }
   clearTimeout(recoveryTimer);
@@ -487,11 +782,16 @@ function play(ch) {
   startStallWatch(video);
   setupMediaSession(ch);
   acquireWakeLock();
+  try { localStorage.setItem(LAST_KEY, JSON.stringify({ name: ch.name, kind: currentKind })); } catch {}
 
   if (window.mytvBridge) window.mytvBridge.sendNowPlaying(displayName(ch));
-  render();
+  // Un canale scelto apre il player grande (se era ridotto in automatico per la ricerca)
+  if (!wasMini) setMini(false);
+  markPlaying();
 }
-function reloadStream() { if (currentItem) play(currentItem); }
+// Ricarica ripartendo dal link principale: se anche le riserve non sono andate,
+// non si resta bloccati sull'ultima (es. relinker RAI, che nel browser non parte mai)
+function reloadStream() { if (currentItem) play(currentItem._alt ? { ...currentItem, _alt: 0 } : currentItem); }
 // Passa al link di riserva successivo del canale (alts). false se non ce ne sono altri.
 function tryNextStream() {
   const ch = currentItem;
@@ -500,6 +800,99 @@ function tryNextStream() {
   console.warn('Stream non disponibile, provo il link di riserva', next);
   play({ ...ch, _alt: next });
   return true;
+}
+
+function stopPlayback() {
+  const v = $('#video'); v.pause(); v.removeAttribute('src'); v.load();
+  if (hls) { hls.destroy(); hls = null; }
+  clearInterval(stallTimer);
+  clearTimeout(recoveryTimer);
+  releaseWakeLock();
+  currentItem = null;
+  const app = $('#app');
+  app.classList.remove('has-player', 'playing', 'paused', 'mini');
+  $('#playerWrap').dataset.state = 'idle';
+  $('#playerWrap').classList.remove('loading');
+  $('#nowPlaying').textContent = '';
+  if (window.mytvBridge) window.mytvBridge.sendNowPlaying(null);
+  markPlaying();
+}
+
+function updateNowPlaying(ch) {
+  const app = $('#app');
+  const stage = $('#playerWrap');
+  app.classList.add('has-player', 'playing');
+  stage.dataset.state = 'playing';
+  stage.dataset.kind = currentKind;
+  stage.classList.remove('has-resume');
+  $('#resumeBtn').hidden = true;
+  $('#nowPlaying').textContent = displayName(ch);
+  $('#nowSub').textContent = currentKind === 'radio' ? 'Radio in diretta' : 'In diretta';
+  setLogoBox($('#nowLogo'), ch);
+  setLogoBox($('#radioLogo'), ch);
+  updateNowFav();
+}
+function setLogoBox(box, ch) {
+  box.textContent = '';
+  box.style.backgroundImage = ch.logo ? `url("${ch.logo}")` : '';
+  if (!ch.logo) box.textContent = initials(displayName(ch));
+}
+function updateNowFav() {
+  const b = $('#nowFavBtn');
+  if (!b) return;
+  const on = !!(currentItem && isFav(currentItem));
+  b.classList.toggle('on', on);
+  b.innerHTML = on ? HEART_FULL : HEART;
+}
+function markPlaying() {
+  $$('#channelList .tile, #channelList .row').forEach(el => {
+    el.classList.toggle('playing', !!currentItem && el.dataset.id === channelId(currentItem));
+  });
+}
+
+// Cambio canale ‹ › nell'ordine mostrato
+function zap(dir) {
+  if (!currentItem) return;
+  let pool = zapList.filter(c => kindOf(c) === currentKind && c.stream);
+  let i = pool.findIndex(c => c.name === currentItem.name);
+  if (i === -1) { pool = visibleItems(currentKind).filter(c => c.stream); i = pool.findIndex(c => c.name === currentItem.name); }
+  if (!pool.length) return;
+  const next = pool[(i + dir + pool.length) % pool.length];
+  play(next);
+  const el = $(`#channelList [data-id="${CSS.escape(channelId(next))}"]`);
+  if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+// Mini-player su telefono
+let autoMini = false;
+function setMini(on, auto = false) {
+  const app = $('#app');
+  if (!app.classList.contains('has-player') && on) return;
+  app.classList.toggle('mini', on);
+  autoMini = on && auto;
+}
+
+// "Riprendi" l'ultimo canale guardato (senza partire da solo: iPhone blocca l'audio automatico)
+function showResume() {
+  let last = null;
+  try { last = JSON.parse(localStorage.getItem(LAST_KEY) || 'null'); } catch {}
+  if (!last) return;
+  const pool = last.kind === 'radio' ? RADIO_STATIONS : channels;
+  const ch = pool.find(c => c.name === last.name) || pool.find(c => normName(c.name) === normName(last.name));
+  if (!ch || !ch.stream || currentItem) return;
+  const stage = $('#playerWrap');
+  $('#resumeName').textContent = displayName(ch);
+  $('#resumeBtn').hidden = false;
+  $('#resumeBtn').onclick = () => play(ch);
+  stage.classList.add('has-resume');
+  stage.dataset.kind = last.kind;
+  setLogoBox($('#radioLogo'), ch);
+  $('#nowPlaying').textContent = displayName(ch);
+  $('#nowSub').textContent = 'Ultimo canale guardato';
+  setLogoBox($('#nowLogo'), ch);
+  // Su telefono il riquadro "Riprendi" occupa spazio solo come mini-player
+  $('#app').classList.add('has-player');
+  if (!window.matchMedia('(min-width: 600px)').matches) setMini(true, true);
 }
 
 // ---------- Sync via GitHub Gist ----------
@@ -611,7 +1004,8 @@ function applyPrefs(p) {
   if (Array.isArray(p.hidden)) { hidden = new Set(p.hidden); localStorage.setItem(HIDDEN_KEY, JSON.stringify(p.hidden)); }
   if (p.renames && typeof p.renames === 'object') { renames = p.renames; localStorage.setItem(RENAME_KEY, JSON.stringify(renames)); }
   if (p.listUrl && p.listUrl !== localStorage.getItem(STORAGE_KEY)) {
-    loadFromUrl(p.listUrl).catch(()=>{});
+    if (p.listUrl.startsWith('merged:')) loadMergedDefaults().catch(()=>{});
+    else loadFromUrl(p.listUrl).catch(()=>{});
   }
 }
 
@@ -629,26 +1023,36 @@ function updateSyncStatusUI() {
 
 // ---------- UI wiring ----------
 function setTab(tab) {
+  if (!['tv', 'radio', 'apps'].includes(tab)) tab = 'tv';
   currentTab = tab;
   localStorage.setItem(TAB_KEY, tab);
-  $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  $$('.rail-btn[data-section]').forEach(t => t.classList.toggle('active', t.dataset.section === tab));
+  if (editMode && tab === 'apps') toggleEditMode();
   render();
+  $('#scroller').scrollTop = 0;
 }
 
-function openModal() { $('#modal').classList.remove('hidden'); $('#listUrl').value = localStorage.getItem(STORAGE_KEY) || ''; setTimeout(()=>$('#listUrl').focus(), 100); }
+let toastTimer = null;
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function openModal() { $('#modal').classList.remove('hidden'); const u = localStorage.getItem(STORAGE_KEY) || ''; $('#listUrl').value = u.startsWith('merged:') ? '' : u; setTimeout(()=>$('#listUrl').focus(), 100); }
 function closeModal() { $('#modal').classList.add('hidden'); }
 function openMenu() { $('#sideMenu').classList.remove('hidden'); $('#gistTokenInput').value = localStorage.getItem(GIST_TOKEN_KEY) || ''; updateSyncStatusUI(); }
 function closeMenu() { $('#sideMenu').classList.add('hidden'); }
-function toggleSearch() {
-  const bar = $('#searchBar');
-  bar.classList.toggle('hidden');
-  if (!bar.classList.contains('hidden')) $('#searchInput').focus();
-  else { searchQuery = ''; $('#searchInput').value = ''; render(); }
+function clearSearch() {
+  searchQuery = ''; $('#searchInput').value = ''; $('#closeSearch').hidden = true; render();
 }
 function toggleEditMode() {
   editMode = !editMode;
   document.body.classList.toggle('edit-mode', editMode);
-  $('#editModeBtn').textContent = editMode ? 'Esci da modifica' : 'Modifica lista (ordina/nascondi/rinomina)';
+  $('#editModeBtn').textContent = editMode ? 'Esci da modifica' : 'Modifica lista (ordina, nascondi, rinomina)';
+  if (editMode && currentTab === 'apps') { currentTab = 'tv'; setTab('tv'); return; }
   render();
 }
 
@@ -721,14 +1125,22 @@ async function loadDefaultListIfNeeded() {
 
 document.addEventListener('DOMContentLoaded', () => {
   loadCached();
+  if (!CATEGORIES.some(c => c.id === currentChip)) currentChip = 'all';
   setTab(currentTab);
-  loadDefaultListIfNeeded();
+  showResume();
+  loadDefaultListIfNeeded().then(() => { if (!currentItem && $('#resumeBtn').hidden) showResume(); });
   // pull iniziale se sync configurato
   if (localStorage.getItem(GIST_TOKEN_KEY)) {
     pullSync().catch(e => setSyncStatus('Errore sync: ' + e.message, 'err'));
   }
 
-  $('#addBtn').addEventListener('click', openModal);
+  $$('.rail-btn[data-section]').forEach(b => b.addEventListener('click', () => {
+    if (b.dataset.section === currentTab) { $('#scroller').scrollTo({ top: 0, behavior: 'smooth' }); return; }
+    if (searchQuery) { searchQuery = ''; $('#searchInput').value = ''; $('#closeSearch').hidden = true; }
+    setTab(b.dataset.section);
+  }));
+
+  $('#addBtn').addEventListener('click', () => { closeMenu(); openModal(); });
   $('#cancelBtn').addEventListener('click', closeModal);
   $('#loadBtn').addEventListener('click', async () => {
     const url = $('#listUrl').value.trim();
@@ -741,12 +1153,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
   $('#reloadBtn').addEventListener('click', async () => {
     const url = localStorage.getItem(STORAGE_KEY);
-    if (url) { try { await loadFromUrl(url); } catch (e) { alert('Errore: ' + e.message); } }
+    $('#reloadBtn').textContent = 'Aggiornamento…';
+    try {
+      if (!url || url.startsWith('merged:')) await loadMergedDefaults();
+      else await loadFromUrl(url);
+      toast('Lista aggiornata');
+    } catch (e) { alert('Errore: ' + e.message); }
+    finally { $('#reloadBtn').textContent = 'Aggiorna la lista'; }
     if (localStorage.getItem(GIST_TOKEN_KEY)) pullSync().catch(()=>{});
   });
 
   $('#menuBtn').addEventListener('click', openMenu);
   $('#closeMenuBtn').addEventListener('click', closeMenu);
+  $('#closeMenuX').addEventListener('click', closeMenu);
   $('#sideMenu').addEventListener('click', (e) => { if (e.target.id === 'sideMenu') closeMenu(); });
 
   $('#restoreDefaultBtn').addEventListener('click', async () => {
@@ -784,27 +1203,91 @@ document.addEventListener('DOMContentLoaded', () => {
     render();
   });
 
-  $('#favBtn').addEventListener('click', () => {
-    showOnlyFavs = !showOnlyFavs;
-    $('#favBtn').style.color = showOnlyFavs ? 'var(--accent)' : '';
+  // Ricerca sempre visibile
+  const si = $('#searchInput');
+  si.addEventListener('input', (e) => {
+    searchQuery = e.target.value.toLowerCase().trim();
+    $('#closeSearch').hidden = !e.target.value;
     render();
   });
+  si.addEventListener('focus', () => {
+    // Su telefono la tastiera copre metà schermo: il player si riduce
+    if (!window.matchMedia('(min-width: 600px)').matches && currentItem) setMini(true, true);
+  });
+  si.addEventListener('blur', () => { if (autoMini && !searchQuery && currentItem) setMini(false); });
+  si.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { const first = zapList.find(c => c.stream); if (first) { choose(first); } }
+    if (e.key === 'Escape') { clearSearch(); si.blur(); }
+  });
+  $('#closeSearch').addEventListener('click', (e) => { e.preventDefault(); clearSearch(); });
 
-  $('#searchBtn').addEventListener('click', toggleSearch);
-  $('#closeSearch').addEventListener('click', toggleSearch);
-  $('#searchInput').addEventListener('input', (e) => { searchQuery = e.target.value.toLowerCase().trim(); render(); });
+  $('#viewBtn').addEventListener('click', () => {
+    viewMode = viewMode === 'grid' ? 'list' : 'grid';
+    localStorage.setItem(VIEW_KEY, viewMode);
+    render();
+  });
+  $('#editDoneBtn').addEventListener('click', toggleEditMode);
 
-  $$('.tab').forEach(t => t.addEventListener('click', () => setTab(t.dataset.tab)));
-
-  $('#playPauseBtn').addEventListener('click', () => { const v = $('#video'); if (v.paused) v.play(); else v.pause(); });
+  // Player
+  const v = $('#video');
+  const stage = $('#playerWrap');
+  const setPaused = () => $('#app').classList.toggle('paused', v.paused);
+  v.addEventListener('play', setPaused);
+  v.addEventListener('pause', setPaused);
+  v.addEventListener('waiting', () => stage.classList.add('loading'));
+  v.addEventListener('loadstart', () => { if (currentItem) stage.classList.add('loading'); });
+  ['playing', 'canplay', 'emptied', 'error'].forEach(t => v.addEventListener(t, () => stage.classList.remove('loading')));
+  $('#playPauseBtn').addEventListener('click', () => { if (!currentItem) { $('#resumeBtn').click(); return; } if (v.paused) v.play(); else v.pause(); });
   $('#reloadStreamBtn').addEventListener('click', reloadStream);
   $('#fullscreenBtn').addEventListener('click', enterFullscreen);
-  $('#closePlayer').addEventListener('click', () => {
-    const v = $('#video'); v.pause(); v.removeAttribute('src'); v.load();
-    if (hls) { hls.destroy(); hls = null; }
-    clearInterval(stallTimer);
-    releaseWakeLock();
-    currentItem = null; $('#nowPlaying').textContent = ''; render();
+  $('#prevBtn').addEventListener('click', () => zap(-1));
+  $('#nextBtn').addEventListener('click', () => zap(1));
+  $('#nowFavBtn').addEventListener('click', () => { if (currentItem) toggleFav(currentItem); });
+  $('#miniBtn').addEventListener('click', () => setMini(!$('#app').classList.contains('mini')));
+  $('#closePlayer').addEventListener('click', stopPlayback);
+  // Mini-player: toccandolo si riapre grande
+  stage.addEventListener('click', (e) => {
+    if (!$('#app').classList.contains('mini') || e.target.closest('button')) return;
+    if (!currentItem) { $('#resumeBtn').click(); return; }
+    setMini(false);
+  });
+
+  // AirPlay (Apple TV, smart TV, auto compatibili con "AirPlay in auto")
+  if (window.WebKitPlaybackTargetAvailabilityEvent) {
+    v.addEventListener('webkitplaybacktargetavailabilitychanged', (e) => { $('#castBtn').hidden = e.availability !== 'available'; });
+    $('#castBtn').addEventListener('click', () => { try { v.webkitShowPlaybackTargetPicker(); } catch {} });
+  }
+  // Picture in Picture
+  const canPip = document.pictureInPictureEnabled || (v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode('picture-in-picture'));
+  if (canPip) {
+    $('#pipBtn').hidden = false;
+    $('#pipBtn').addEventListener('click', async () => {
+      try {
+        if (document.pictureInPictureElement) await document.exitPictureInPicture();
+        else if (v.requestPictureInPicture) await v.requestPictureInPicture();
+        else v.webkitSetPresentationMode('picture-in-picture');
+      } catch {}
+    });
+  }
+
+  // Menu del canale
+  $('#sheet').addEventListener('click', (e) => { if (e.target.id === 'sheet') closeSheet(); });
+  $('#sheetCancel').addEventListener('click', closeSheet);
+  $('#sheetPlay').addEventListener('click', () => { const c = sheetCh; closeSheet(); if (c) choose(c); });
+  $('#sheetFav').addEventListener('click', () => { const c = sheetCh; closeSheet(); if (c) toggleFav(c); });
+  $('#sheetRename').addEventListener('click', () => { const c = sheetCh; closeSheet(); if (c) openRenameModal(c); });
+  $('#sheetHide').addEventListener('click', () => { const c = sheetCh; closeSheet(); if (c) { toggleHidden(c); toast(hidden.has(channelId(c)) ? 'Canale nascosto (lo ritrovi in Modifica lista)' : 'Canale di nuovo visibile'); } });
+
+  // Scorciatoie da tastiera (Mac)
+  document.addEventListener('keydown', (e) => {
+    const typing = /INPUT|TEXTAREA/.test(document.activeElement && document.activeElement.tagName);
+    if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === '/') { e.preventDefault(); si.focus(); }
+    else if (e.key === 'ArrowUp' && currentItem) { e.preventDefault(); zap(-1); }
+    else if (e.key === 'ArrowDown' && currentItem) { e.preventDefault(); zap(1); }
+    else if ((e.key === 'f' || e.key === 'F') && currentItem) enterFullscreen();
+    else if (e.key === ' ' && currentItem && document.activeElement === document.body) { e.preventDefault(); if (v.paused) v.play(); else v.pause(); }
+    else if (e.key === 'Escape') { closeSheet(); closeMenu(); }
   });
 
   // Riprende il wake lock quando l'app torna in primo piano
@@ -817,7 +1300,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Toggle wake lock nelle impostazioni
   const wlBtn = $('#wakeLockToggle');
   if (wlBtn) {
-    const refresh = () => { wlBtn.textContent = localStorage.getItem('mytv.wakeLockDisabled') === '1' ? 'Wake Lock OFF (audio si interrompe se schermo bloccato)' : 'Wake Lock ON (schermo resta acceso durante riproduzione)'; };
+    const refresh = () => { wlBtn.textContent = localStorage.getItem('mytv.wakeLockDisabled') === '1' ? 'Wake Lock OFF (lo schermo si spegne)' : 'Wake Lock ON (schermo acceso durante la riproduzione)'; };
     refresh();
     wlBtn.addEventListener('click', () => {
       const off = localStorage.getItem('mytv.wakeLockDisabled') === '1';
@@ -833,6 +1316,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Rename modal
   $('#renameCancelBtn').addEventListener('click', closeRenameModal);
   $('#renameSaveBtn').addEventListener('click', saveRename);
+  $('#renameInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') saveRename(); });
 
   // Sync settings
   $('#saveTokenBtn').addEventListener('click', async () => {
@@ -867,10 +1351,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (ch) { setTab(kind); play(ch); }
     });
     window.mytvBridge.onToggle(() => { const v = $('#video'); if (v.paused) v.play(); else v.pause(); });
-    window.mytvBridge.onStop(() => {
-      const v = $('#video'); v.pause(); v.removeAttribute('src'); v.load();
-      if (hls) { hls.destroy(); hls = null; }
-      currentItem = null; window.mytvBridge.sendNowPlaying(null); render();
-    });
+    window.mytvBridge.onStop(() => stopPlayback());
   }
 });

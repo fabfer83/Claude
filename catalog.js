@@ -91,3 +91,34 @@ window.DEFAULT_FAVS = [
   'La7', 'TV8', 'Nove', 'Real Time', 'DMAX', 'Mediaset Extra',
   'Cine34', 'Focus', 'RTL 102.5 TV', 'Rai News 24', 'Sky TG24', 'TGCom24'
 ];
+
+// Numerazione del digitale terrestre (solo per l'ordine predefinito dei canali nazionali,
+// finché l'utente non sceglie un ordine suo). Chiave = nome normalizzato.
+window.TV_LCN = {
+  'rai 1': 1, 'rai 2': 2, 'rai 3': 3, 'rete 4': 4, 'canale 5': 5, 'italia 1': 6, 'la7': 7,
+  'tv8': 8, 'nove': 9, '20': 20, '20 mediaset': 20, 'rai 4': 21, 'iris': 22, 'rai 5': 23,
+  'rai movie': 24, 'rai premium': 25, 'cielo': 26, 'twentyseven': 27, '27 twentyseven': 27,
+  'tv2000': 28, 'tv 2000': 28, 'la7 cinema': 29, 'la7d': 29, 'la5': 30, 'la 5': 30,
+  'real time': 31, 'qvc': 32, 'food network': 33, 'cine34': 34, 'focus': 35, 'rtl 1025 tv': 36,
+  'giallo': 38, 'top crime': 39, 'boing': 40, 'k2': 41, 'rai gulp': 42, 'rai yoyo': 43,
+  'frisbee': 44, 'cartoonito': 46, 'super': 47, 'rai news 24': 48, 'italia 2': 49,
+  'sky tg24': 50, 'tgcom24': 51, 'tgcom 24': 51, 'dmax': 52, 'rai storia': 54,
+  'mediaset extra': 55, 'hgtv': 56, 'hgtv  home  garden tv': 56, 'rai scuola': 57, 'rai sport': 58,
+  'motor trend': 59, 'sportitalia': 60,
+};
+
+// Sezione "App": servizi in streaming aperti con il loro link ufficiale.
+// myTV non incorpora questi servizi e non chiede né conserva password:
+// il login resta nell'app ufficiale o nel browser del servizio.
+window.APPS_CATALOG = [
+  { id: 'netflix',  name: 'Netflix',           url: 'https://www.netflix.com/browse',              bg: '#000000', fg: '#E50914', mark: 'NETFLIX',  font: 'heavy' },
+  { id: 'prime',    name: 'Prime Video',       url: 'https://www.primevideo.com/',                 bg: '#0F171E', fg: '#FFFFFF', mark: 'prime video', accent: '#1A98FF' },
+  { id: 'disney',   name: 'Disney+',           url: 'https://www.disneyplus.com/it-it/home',        bg: 'linear-gradient(135deg,#0b1d5a,#0e3fa8 60%,#1b8fd6)', fg: '#FFFFFF', mark: 'Disney+' },
+  { id: 'infinity', name: 'Mediaset Infinity', url: 'https://mediasetinfinity.mediaset.it/',       bg: 'linear-gradient(135deg,#14143c,#3b1d8f)', fg: '#FFFFFF', mark: 'Mediaset Infinity' },
+  { id: 'infplus',  name: 'Infinity+',         url: 'https://mediasetinfinity.mediaset.it/infinity-plus', bg: 'linear-gradient(135deg,#1a0f3d,#6a1fd1)', fg: '#FFFFFF', mark: 'Infinity+' },
+  { id: 'raiplay',  name: 'RaiPlay',           url: 'https://www.raiplay.it/',                     bg: 'linear-gradient(135deg,#00122e,#0a4bd6)', fg: '#FFFFFF', mark: 'RaiPlay' },
+  { id: 'now',      name: 'NOW',               url: 'https://www.nowtv.it/',                       bg: 'linear-gradient(135deg,#0d0d0d,#2a2a2a)', fg: '#FFFFFF', mark: 'NOW', accent: '#21E0A5' },
+  { id: 'dazn',     name: 'DAZN',              url: 'https://www.dazn.com/it-IT/home',             bg: '#0C161C', fg: '#F7FF1A', mark: 'DAZN', font: 'heavy' },
+  { id: 'youtube',  name: 'YouTube',           url: 'https://www.youtube.com/',                    bg: '#FFFFFF', fg: '#FF0000', mark: 'YouTube', dark: true },
+  { id: 'ytkids',   name: 'YouTube Kids',      url: 'https://www.youtubekids.com/',                bg: 'linear-gradient(135deg,#ff4d4d,#ffb000)', fg: '#FFFFFF', mark: 'YouTube Kids' },
+];
